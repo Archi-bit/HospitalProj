@@ -1,0 +1,63 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Backend production Dockerfile
+# Django + Gunicorn
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Stage 1: build dependencies in a clean layer
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+# Системные зависимости для сборки (psycopg2, Pillow и т.д.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    libjpeg-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip install --prefix=/install --no-cache-dir -r requirements.txt
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 2: final image — только runtime, без build tools
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Runtime-зависимости (libpq для psycopg2, libjpeg для Pillow)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    libjpeg62-turbo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Копируем установленные пакеты из builder
+COPY --from=builder /install /usr/local
+
+# Копируем исходный код
+COPY . .
+
+# Создаём непривилегированного пользователя
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+
+# Директории для статики и медиа
+RUN mkdir -p /app/staticfiles /app/media && \
+    chown -R appuser:appgroup /app
+
+USER appuser
+
+# Собираем статику
+RUN python manage.py collectstatic --noinput
+
+EXPOSE 8000
+
+# Gunicorn: 3 воркера, таймаут 120с, bind 0.0.0.0:8000
+CMD ["gunicorn", "config.wsgi:application", \
+     "--workers", "3", \
+     "--worker-class", "sync", \
+     "--bind", "0.0.0.0:8000", \
+     "--timeout", "120", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-", \
+     "--log-level", "info"]
